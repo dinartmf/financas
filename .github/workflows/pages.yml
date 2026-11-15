@@ -1,0 +1,49 @@
+name: Publicar no GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Permissões mínimas necessárias
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verificar que nenhuma chave secreta foi commitada
+        run: |
+          if grep -RInE "service_role|sb_secret_" --include="*.js" --include="*.html" . ; then
+            echo "::error::Encontrada chave secreta do Supabase no código. Remova antes de publicar."
+            exit 1
+          fi
+
+      - name: Montar pasta publicada (somente arquivos do site)
+        run: |
+          mkdir -p _site/assets
+          cp index.html config.js _site/
+          cp assets/*.js assets/*.css _site/assets/
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

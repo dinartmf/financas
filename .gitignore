@@ -1,0 +1,7 @@
+.DS_Store
+*.local
+.env
+.env.*
+node_modules/
+backup*.json
+financas-backup-*.json
