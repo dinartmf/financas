@@ -27,7 +27,7 @@ const DEFAULT = () => ({
     out:['Alimentação','Mercado','Moradia','Contas (luz/água/internet)','Transporte','Saúde','Educação','Lazer','Assinaturas','Compras','Impostos','Outros'],
     in:['Salário','Freelance','Rendimentos','Reembolso','Outros']
   },
-  cards:[], tx:[], invest:[], loans:[], paid:{}
+  cards:[], tx:[], invest:[], loans:[], assets:[], paid:{}
 });
 let S = DEFAULT();
 let versao = null;          // versão da linha no banco (controle de concorrência)
@@ -42,6 +42,7 @@ function sanitizeState(d){
     settings: Object.assign(base.settings, d.settings && typeof d.settings==='object' ? d.settings : {}),
     categories: d.categories && Array.isArray(d.categories.out) && Array.isArray(d.categories.in) ? {out:d.categories.out.map(String), in:d.categories.in.map(String)} : base.categories,
     cards: arr(d.cards), tx: arr(d.tx), invest: arr(d.invest), loans: arr(d.loans).filter(l=>l && typeof l==='object' && l.id),
+    assets: arr(d.assets).filter(a=>a && typeof a==='object' && a.id).map(a=>({...a, ops:arr(a.ops), divs:arr(a.divs)})),
     paid: d.paid && typeof d.paid==='object' ? d.paid : {}
   });
   out.tx.forEach(t=>{ t.amount=Number(t.amount)||0; t.installments=Math.min(48,Math.max(1,Number(t.installments)||1)); t.date=String(t.date||'').slice(0,10); if(!isMonthKey(t.refMonth)) delete t.refMonth; });
@@ -364,7 +365,7 @@ function renderPainel(){
   const rec = m.filter(e=>e.tx.type==='in').reduce((s,e)=>s+e.amount,0);
   const des = m.filter(e=>e.tx.type==='out').reduce((s,e)=>s+e.amount,0);
   const saldo = rec-des;
-  const invs = S.invest.filter(i=>!i.redeemed).map(i=>({i,s:invSnapshot(i)}));
+  const invs = [...S.invest.filter(i=>!i.redeemed).map(i=>({i,s:invSnapshot(i)})), ...rvItems()];
   const invTot = invs.reduce((s,x)=>s+x.s.gross,0);
   const invApl = invs.reduce((s,x)=>s+x.i.amount,0);
 
@@ -803,11 +804,200 @@ function loanUpdateForm(l){
   draw();
 }
 
+/* ---------- Renda variável (FII, ações, ETF…) ---------- */
+// Cada ativo guarda suas operações (compra/venda) e proventos.
+// Preço médio pelo método do custo médio (padrão da Receita Federal):
+// compras somam ao custo; vendas baixam pelo preço médio e geram lucro/prejuízo realizado.
+const RV_KINDS = ['FII','Ações','ETF','BDR','Fiagro','Cripto','Outro'];
+const r2 = v => Math.round((Number(v)||0)*100)/100;
+function assetCalc(a, upTo){
+  const ops=(a.ops||[]).filter(o=>!upTo || o.date<=upTo).slice().sort((x,y)=>x.date.localeCompare(y.date) || (x.type==='buy'?-1:1));
+  let qty=0, cost=0, realized=0, bought=0;
+  for(const o of ops){
+    const q=Number(o.qty)||0, p=Number(o.price)||0, f=Number(o.fees)||0;
+    if(o.type==='buy'){ qty+=q; cost+=q*p+f; bought+=q*p+f; }
+    else if(qty>0){ const avg=cost/qty, qs=Math.min(q,qty); realized+=qs*p-f-qs*avg; cost-=qs*avg; qty-=qs; }
+  }
+  if(qty<1e-9){ qty=0; cost=0; }
+  const avg = qty? cost/qty : 0;
+  const price = Number(a.price)||avg;
+  const market = qty*price;
+  const since12 = isoAddMonths(todayISO(),-12);
+  const divs=(a.divs||[]);
+  const divTotal = divs.reduce((s,d)=>s+(Number(d.total)||0),0);
+  const div12 = divs.filter(d=>d.date>since12).reduce((s,d)=>s+(Number(d.total)||0),0);
+  const div12ps = divs.filter(d=>d.date>since12).reduce((s,d)=>s+(Number(d.perShare)||0),0);
+  return {qty, avg, cost, price, market, unreal:market-cost, unrealPct: cost? (market/cost-1)*100 : 0, realized, divTotal, div12, dy12: price? div12ps/price*100 : 0, yoc12: cost? div12/cost*100 : 0, hasPrice: !!Number(a.price)};
+}
+// Itens no mesmo formato da renda fixa para entrar nos totais, gráficos e liquidez
+function rvItems(){
+  return (S.assets||[]).map(a=>{ const c=assetCalc(a); return c.qty>0 ? {i:{amount:c.cost, kind:a.kind, institution:a.institution, name:a.ticker}, s:{gross:c.market, net:c.market, wait:2, gain:c.unreal}, rv:true} : null; }).filter(Boolean);
+}
+function rvCard(){
+  const list=(S.assets||[]).map(a=>({a,c:assetCalc(a)}));
+  const open=list.filter(x=>x.c.qty>0), closed=list.filter(x=>x.c.qty===0);
+  const tc=open.reduce((s,x)=>s+x.c.cost,0), tm=open.reduce((s,x)=>s+x.c.market,0), td=list.reduce((s,x)=>s+x.c.div12,0);
+  const row=({a,c})=>`<tr>
+    <td><b style="font-weight:700">${esc(a.ticker)}</b><div class="small muted">${esc(a.kind)}${a.institution?' · '+esc(a.institution):''}</div></td>
+    <td class="r num">${c.qty.toLocaleString('pt-BR',{maximumFractionDigits:8})}</td>
+    <td class="r num">${c.qty?fmt(c.avg):'—'}</td>
+    <td class="r num">${c.hasPrice?fmt(c.price):'<span class="muted">—</span>'}<div class="small muted">${a.priceAt?dateBR(a.priceAt):'sem cotação'}</div></td>
+    <td class="r num">${fmt(c.cost)}</td>
+    <td class="r num"><b>${fmt(c.market)}</b></td>
+    <td class="r num ${c.unreal>=0?'pos':'neg'}">${c.qty&&c.hasPrice?(c.unreal>=0?'+':'')+fmt(c.unreal)+`<div class="small">${(c.unrealPct>=0?'+':'')+pct(c.unrealPct)}</div>`:'—'}</td>
+    <td class="r num">${fmt(c.div12)}<div class="small muted">${c.dy12?'DY '+pct(c.dy12):''}</div></td>
+    <td class="r" style="white-space:nowrap"><button class="btn sm" data-act="rvop" data-id="${a.id}">Compra/venda</button> <button class="btn sm" data-act="rvdiv" data-id="${a.id}">Provento</button> <button class="btn sm" data-act="rvprice" data-id="${a.id}">Cotação</button> <button class="btn sm" data-act="rvdetail" data-id="${a.id}" aria-label="Detalhes">⋯</button></td></tr>`;
+  return `<div class="card" style="padding:6px 8px">
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;flex-wrap:wrap"><h3 style="margin:0">Renda variável <span class="muted" style="font-weight:500">· FIIs, ações e ETFs</span></h3>
+      <span class="small muted" style="margin-left:auto">Investido ${fmt(tc)} · Atual <b>${fmt(tm)}</b> <span class="${tm-tc>=0?'pos':'neg'}">(${tm-tc>=0?'+':''}${fmt(tm-tc)})</span> · Proventos 12m <b>${fmt(td)}</b></span>
+      <button class="btn sm primary" data-act="rvnew">+ Ativo</button></div>
+    ${open.length? `<div class="tablewrap"><table class="compact"><thead><tr><th>Ativo</th><th class="r">Cotas</th><th class="r">Preço médio</th><th class="r">Cotação</th><th class="r">Investido</th><th class="r">Valor atual</th><th class="r">Resultado</th><th class="r">Proventos 12m</th><th></th></tr></thead><tbody>${open.map(row).join('')}</tbody></table></div>`
+      : `<div class="empty">Nenhum ativo de renda variável.<br><span class="small">Cadastre o ticker (ex.: MXRF11) com a primeira compra.</span><br><button class="btn primary" data-act="rvnew">+ Ativo</button></div>`}
+    ${closed.length?`<div class="small muted" style="padding:8px 10px">Posições encerradas: ${closed.map(({a,c})=>`<button class="linkbtn" data-act="rvdetail" data-id="${a.id}">${esc(a.ticker)}</button> (${c.realized>=0?'+':''}${fmt(c.realized)})`).join(' · ')}</div>`:''}
+    <div class="small muted" style="padding:4px 10px 10px">Valor atual = cotas × última cotação informada. Liquidez considerada: D+2 (venda na bolsa). Proventos registrados entram como receita em Lançamentos.</div>
+  </div>`;
+}
+function opPreview(a, op, editingId){
+  const ops=(a.ops||[]).filter(o=>o.id!==editingId);
+  return assetCalc({...a, ops:[...ops, op]});
+}
+function rvAssetForm(a){
+  const isNew=!a; a=a||{ticker:'',name:'',kind:'FII',institution:'',price:'',ops:[],divs:[]};
+  openModal(`<h2>${isNew?'Novo ativo':'Editar '+esc(a.ticker)}</h2>
+    <form class="form" id="af">
+      <label>Ticker<input name="ticker" required maxlength="12" value="${esc(a.ticker)}" placeholder="ex.: MXRF11" style="text-transform:uppercase"></label>
+      <label>Tipo<select name="kind">${RV_KINDS.map(k=>`<option ${a.kind===k?'selected':''}>${k}</option>`).join('')}</select></label>
+      <label>Corretora<input name="institution" value="${esc(a.institution)}" placeholder="ex.: Itaú, XP"></label>
+      <label>Nome <span class="hint">opcional</span><input name="name" value="${esc(a.name)}" placeholder="ex.: Maxi Renda"></label>
+      ${isNew?`<div class="full small" style="font-weight:600;color:var(--ink-2);margin-top:4px">Primeira compra <span class="hint" style="font-weight:400">use os dados da nota de corretagem (ordem executada)</span></div>
+      <label>Data da compra<input name="date" type="date" value="${todayISO()}"></label>
+      <label>Quantidade de cotas<input name="qty" inputmode="decimal" placeholder="ex.: 20"></label>
+      <label>Preço por cota<input name="price" inputmode="decimal" placeholder="ex.: 8,76"></label>
+      <label>Taxas <span class="hint">emolumentos/corretagem, opcional</span><input name="fees" inputmode="decimal" placeholder="0,00"></label>
+      <div class="full note" id="afHint">Preencha quantidade e preço.</div>`:''}
+    </form>
+    <div class="actions">${!isNew?`<button class="btn danger left" data-m="del">Excluir ativo</button>`:''}<button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok">Salvar</button></div>`);
+  const f=$('#af');
+  if(isNew){ const h=()=>{ const d=readForm(f); const q=parseNum(d.qty), p=parseNum(d.price), fe=parseNum(d.fees); $('#afHint').innerHTML = q&&p ? `Total da compra: <b>${fmt(q*p+fe)}</b> · preço médio ${fmt((q*p+fe)/q)}` : 'Preencha quantidade e preço.'; }; f.addEventListener('input',h); }
+  modalActions({
+    ok:()=>{ const d=readForm(f); const ticker=String(d.ticker||'').trim().toUpperCase().replace(/\s+/g,'');
+      if(!/^[A-Z0-9.\-]{3,12}$/.test(ticker)) return toast('Informe um ticker válido (ex.: MXRF11)');
+      S.assets=S.assets||[];
+      if(isNew && S.assets.some(x=>x.ticker===ticker)) return toast(`${ticker} já existe — use "Compra/venda" nele`);
+      const rec={...a, ticker, kind:d.kind, institution:(d.institution||'').trim(), name:(d.name||'').trim()};
+      if(isNew){
+        const q=parseNum(d.qty), p=parseNum(d.price), fe=parseNum(d.fees);
+        if(!(q>0)) return toast('Informe a quantidade de cotas'); if(!(p>0)) return toast('Informe o preço por cota'); if(!d.date) return toast('Informe a data');
+        rec.id=uid(); rec.ops=[{id:uid(), type:'buy', date:d.date, qty:q, price:p, fees:fe||0}]; rec.divs=[]; rec.price=p; rec.priceAt=d.date;
+        S.assets.push(rec);
+      } else S.assets[S.assets.findIndex(x=>x.id===a.id)]=rec;
+      save(); closeModal(); rerender(); toast(isNew?`${ticker} cadastrado`:'Ativo atualizado'); },
+    del:()=>{ const n=S.tx.filter(t=>t.assetId===a.id).length; confirmBox(`Excluir ${esc(a.ticker)} com todas as operações e proventos?${n?` As ${n} receitas de proventos já lançadas continuam em Lançamentos.`:''}`,()=>{ S.tx.forEach(t=>{ if(t.assetId===a.id){ delete t.assetId; delete t.divId; } }); S.assets=S.assets.filter(x=>x.id!==a.id); save(); rerender(); toast('Ativo excluído'); }); }
+  });
+}
+function rvOpForm(a, op){
+  const isNew=!op; op=op||{type:'buy', date:todayISO(), qty:'', price:'', fees:''};
+  let type=op.type;
+  const draw=()=>{
+    const cur=assetCalc({...a, ops:(a.ops||[]).filter(o=>o.id!==op.id)});
+    openModal(`<h2>${isNew?'Nova operação':'Editar operação'} · ${esc(a.ticker)}</h2>
+      <div class="small muted" style="margin:-8px 0 12px">Em carteira: ${cur.qty.toLocaleString('pt-BR',{maximumFractionDigits:8})} cotas · preço médio ${fmt(cur.avg)}</div>
+      <form class="form" id="of">
+        <div class="full typeseg"><button type="button" class="in ${type==='buy'?'on':''}" data-t="buy">Compra</button><button type="button" class="out ${type==='sell'?'on':''}" data-t="sell">Venda</button></div>
+        <label>Data<input name="date" type="date" value="${esc(op.date)}"></label>
+        <label>Quantidade<input name="qty" inputmode="decimal" value="${op.qty!==''?String(op.qty).replace('.',','):''}"></label>
+        <label>Preço por cota<input name="price" inputmode="decimal" value="${op.price!==''?String(op.price).replace('.',','):''}"></label>
+        <label>Taxas <span class="hint">opcional</span><input name="fees" inputmode="decimal" value="${op.fees?String(op.fees).replace('.',','):''}"></label>
+        <div class="full note" id="ofHint"></div>
+      </form>
+      <div class="actions">${!isNew?`<button class="btn danger left" data-m="del">Excluir</button>`:''}<button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok">Salvar</button></div>`);
+    const f=$('#of');
+    f.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{ Object.assign(op, readForm(f)); type=b.dataset.t; draw(); });
+    const build=()=>{ const d=readForm(f); return {id:op.id||'tmp', type, date:d.date, qty:parseNum(d.qty), price:parseNum(d.price), fees:parseNum(d.fees)}; };
+    const h=()=>{ const o=build(); if(!(o.qty>0&&o.price>0)){ $('#ofHint').textContent='Preencha quantidade e preço.'; return; }
+      if(type==='sell'){ const before=assetCalc({...a, ops:(a.ops||[]).filter(x=>x.id!==op.id)}, o.date); if(o.qty>before.qty+1e-9){ $('#ofHint').innerHTML=`<span class="neg">Você tinha só ${before.qty.toLocaleString('pt-BR')} cotas nessa data.</span>`; return; }
+        const res=o.qty*o.price-o.fees-o.qty*before.avg; $('#ofHint').innerHTML=`Valor da venda <b>${fmt(o.qty*o.price-o.fees)}</b> · resultado <b class="${res>=0?'pos':'neg'}">${res>=0?'+':''}${fmt(res)}</b> sobre o preço médio de ${fmt(before.avg)}`; }
+      else { const after=opPreview(a,o,op.id); $('#ofHint').innerHTML=`Total da compra <b>${fmt(o.qty*o.price+o.fees)}</b> · depois: ${after.qty.toLocaleString('pt-BR',{maximumFractionDigits:8})} cotas a preço médio <b>${fmt(after.avg)}</b>`; } };
+    f.addEventListener('input',h); h();
+    modalActions({
+      ok:()=>{ const o=build(); if(!o.date) return toast('Informe a data'); if(!(o.qty>0)) return toast('Informe a quantidade'); if(!(o.price>0)) return toast('Informe o preço');
+        if(type==='sell'){ const before=assetCalc({...a, ops:(a.ops||[]).filter(x=>x.id!==op.id)}, o.date); if(o.qty>before.qty+1e-9) return toast('Quantidade maior que a posição nessa data'); }
+        const rec={id:op.id||uid(), type, date:o.date, qty:o.qty, price:o.price, fees:o.fees||0};
+        a.ops=(a.ops||[]).filter(x=>x.id!==rec.id); a.ops.push(rec);
+        if(!a.priceAt || rec.date>=a.priceAt){ a.price=rec.price; a.priceAt=rec.date; }
+        save(); closeModal(); rerender(); toast(type==='buy'?'Compra registrada':'Venda registrada'); },
+      del:()=>confirmBox('Excluir esta operação?',()=>{ a.ops=a.ops.filter(x=>x.id!==op.id); save(); rerender(); })
+    });
+  };
+  draw();
+}
+function rvDivForm(a){
+  const cats=S.categories.in, defCat=cats.includes('Rendimentos')?'Rendimentos':cats[0];
+  const date0=todayISO(), q0=assetCalc(a,date0).qty;
+  openModal(`<h2>Provento · ${esc(a.ticker)}</h2>
+    <form class="form" id="df">
+      <label>Data de pagamento<input name="date" type="date" value="${date0}"></label>
+      <label>Tipo<select name="kind"><option>Rendimento</option><option>Dividendo</option><option>JCP</option><option>Amortização</option></select></label>
+      <label>Valor por cota<input name="perShare" inputmode="decimal" placeholder="ex.: 0,10"></label>
+      <label>Cotas com direito<input name="qty" inputmode="decimal" value="${String(q0).replace('.',',')}"><span class="hint">posição na data-com; ajuste se diferente</span></label>
+      <label>Total recebido <span class="hint">calculado — ajuste se o líquido for diferente</span><input name="total" inputmode="decimal" placeholder="0,00"></label>
+      <div></div>
+      <label class="full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="asIncome" checked style="width:16px;height:16px"> Lançar como receita em Lançamentos</label>
+      <label>Categoria da receita<select name="category">${cats.map(c=>`<option ${c===defCat?'selected':''}>${esc(c)}</option>`).join('')}</select></label>
+    </form>
+    <div class="actions"><button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok">Salvar</button></div>`);
+  const f=$('#df'); let totalTouched=false;
+  f.total.addEventListener('input',()=>totalTouched=true);
+  const h=()=>{ const d=readForm(f); if(!totalTouched){ const t=parseNum(d.perShare)*parseNum(d.qty); f.total.value = t? t.toFixed(2).replace('.',',') : ''; } };
+  f.perShare.addEventListener('input',h); f.qty.addEventListener('input',h);
+  f.date.addEventListener('change',()=>{ f.qty.value=String(assetCalc(a,f.date.value).qty).replace('.',','); h(); });
+  modalActions({ ok:()=>{ const d=readForm(f); const total=r2(parseNum(d.total)), ps=parseNum(d.perShare), q=parseNum(d.qty);
+    if(!(total>0)) return toast('Informe o valor por cota (ou o total)'); if(!d.date) return toast('Informe a data');
+    const div={id:uid(), date:d.date, kind:d.kind, perShare: ps || (q? total/q : 0), qty:q, total};
+    if(d.asIncome){ const txId=uid(); div.txId=txId; S.tx.push({id:txId, type:'in', desc:`${d.kind} ${a.ticker}`, amount:total, date:d.date, category:d.category, method:'outro', assetId:a.id, divId:div.id, notes:`${q.toLocaleString('pt-BR')} cotas × ${fmt(div.perShare)}`}); }
+    a.divs=(a.divs||[]); a.divs.push(div);
+    save(); closeModal(); rerender(); toast('Provento registrado'); } });
+}
+function rvPriceForm(a){
+  const c=assetCalc(a);
+  openModal(`<h2>Cotação · ${esc(a.ticker)}</h2>
+    <form class="form" id="pf">
+      <label>Preço atual da cota<input name="price" inputmode="decimal" value="${a.price?String(a.price).replace('.',','):''}" placeholder="ex.: 9,05"></label>
+      <label>Data da cotação<input name="date" type="date" value="${todayISO()}"></label>
+      <div class="full note" id="pfHint"></div>
+    </form>
+    <div class="actions"><button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok">Salvar</button></div>`);
+  const f=$('#pf'); const h=()=>{ const p=parseNum(f.price.value); if(!p||!c.qty){ $('#pfHint').textContent=''; return; } const m=c.qty*p, g=m-c.cost; $('#pfHint').innerHTML=`${c.qty.toLocaleString('pt-BR')} cotas × ${fmt(p)} = <b>${fmt(m)}</b> · resultado <b class="${g>=0?'pos':'neg'}">${g>=0?'+':''}${fmt(g)} (${pct(c.cost?(m/c.cost-1)*100:0)})</b>`; };
+  f.addEventListener('input',h); h();
+  modalActions({ ok:()=>{ const p=parseNum(f.price.value); if(!(p>0)) return toast('Informe o preço'); a.price=p; a.priceAt=f.date.value||todayISO(); save(); closeModal(); rerender(); toast('Cotação atualizada'); } });
+}
+function rvDetail(a){
+  const c=assetCalc(a);
+  const ops=(a.ops||[]).slice().sort((x,y)=>y.date.localeCompare(x.date)), divs=(a.divs||[]).slice().sort((x,y)=>y.date.localeCompare(x.date));
+  openModal(`<h2>${esc(a.ticker)} <span class="muted" style="font-size:14px;font-family:Inter">${esc(a.name||a.kind)}</span></h2>
+    <div class="grid" style="grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">
+      <div><div class="small muted">Cotas</div><b class="num">${c.qty.toLocaleString('pt-BR',{maximumFractionDigits:8})}</b></div>
+      <div><div class="small muted">Preço médio</div><b class="num">${fmt(c.avg)}</b></div>
+      <div><div class="small muted">Valor atual</div><b class="num">${fmt(c.market)}</b></div>
+      <div><div class="small muted">Proventos (total)</div><b class="num pos">${fmt(c.divTotal)}</b></div>
+      <div><div class="small muted">Yield on cost 12m</div><b class="num">${pct(c.yoc12)}</b></div>
+      <div><div class="small muted">Lucro realizado</div><b class="num ${c.realized>=0?'pos':'neg'}">${fmt(c.realized)}</b></div>
+    </div>
+    <h3 style="font-size:13px;color:var(--ink-2)">Operações</h3>
+    <div class="tablewrap" style="max-height:200px;overflow:auto"><table class="compact"><tbody>${ops.map(o=>`<tr><td class="num">${dateBR(o.date)}</td><td><span class="pill ${o.type==='buy'?'ok':'open'}">${o.type==='buy'?'Compra':'Venda'}</span></td><td class="r num">${Number(o.qty).toLocaleString('pt-BR')} × ${fmt(o.price)}</td><td class="r num">${fmt(o.qty*o.price+(o.type==='buy'?1:-1)*(o.fees||0))}</td><td class="r"><button class="btn sm" data-m="op" data-oid="${o.id}">Editar</button></td></tr>`).join('')||'<tr><td class="muted">—</td></tr>'}</tbody></table></div>
+    <h3 style="font-size:13px;color:var(--ink-2);margin-top:14px">Proventos</h3>
+    <div class="tablewrap" style="max-height:200px;overflow:auto"><table class="compact"><tbody>${divs.map(d=>`<tr><td class="num">${dateBR(d.date)}</td><td>${esc(d.kind||'Rendimento')}</td><td class="r num">${fmt(d.perShare)}/cota</td><td class="r num pos">${fmt(d.total)}</td><td class="r"><button class="btn sm danger" data-m="deldiv" data-did="${d.id}">Excluir</button></td></tr>`).join('')||'<tr><td class="muted">Nenhum provento registrado.</td></tr>'}</tbody></table></div>
+    <div class="actions"><button class="btn left" data-m="edit">Editar ativo</button><button class="btn" data-m="cancel">Fechar</button></div>`);
+  modalActions({ edit:()=>rvAssetForm(structuredClone(a)) });
+  $('#modal').querySelectorAll('[data-m=op]').forEach(b=>b.onclick=()=>rvOpForm(a, structuredClone(a.ops.find(o=>o.id===b.dataset.oid))));
+  $('#modal').querySelectorAll('[data-m=deldiv]').forEach(b=>b.onclick=()=>{ const d=a.divs.find(x=>x.id===b.dataset.did); confirmBox(`Excluir o provento de ${fmt(d.total)} em ${dateBR(d.date)}?${d.txId?' A receita correspondente em Lançamentos também será excluída.':''}`,()=>{ a.divs=a.divs.filter(x=>x.id!==d.id); if(d.txId) S.tx=S.tx.filter(t=>t.id!==d.txId); save(); rerender(); toast('Provento excluído'); }); });
+}
+
 /* ---------- Investimentos ---------- */
 let invTab='ativos';
 function renderInv(){
   const act = S.invest.filter(i=>invTab==='ativos'? !i.redeemed : i.redeemed).map(i=>({i,s:invSnapshot(i)}));
-  const actAll = S.invest.filter(i=>!i.redeemed).map(i=>({i,s:invSnapshot(i)}));
+  const actAll = [...S.invest.filter(i=>!i.redeemed).map(i=>({i,s:invSnapshot(i)})), ...rvItems()];
   const apl=actAll.reduce((a,x)=>a+x.i.amount,0), gross=actAll.reduce((a,x)=>a+x.s.gross,0), net=actAll.reduce((a,x)=>a+x.s.net,0);
   const imed=actAll.filter(x=>x.s.wait<=1).reduce((a,x)=>a+x.s.net,0);
   const byKind={}; actAll.forEach(x=>byKind[x.i.kind]=(byKind[x.i.kind]||0)+x.s.gross);
@@ -820,7 +1010,7 @@ function renderInv(){
   <div class="grid kpis">
     <div class="card kpi"><div class="label">Total aplicado</div><div class="value num">${fmt(apl)}</div><div class="sub">${actAll.length} aplicações ativas</div></div>
     <div class="card kpi"><div class="label">Valor bruto estimado</div><div class="value num">${fmt(gross)}</div><div class="sub pos">${apl?'+'+fmt(gross-apl)+' ('+pct((gross/apl-1)*100)+')':'—'}</div></div>
-    <div class="card kpi"><div class="label">Líquido estimado</div><div class="value num">${fmt(net)}</div><div class="sub">após IR regressivo</div></div>
+    <div class="card kpi"><div class="label">Líquido estimado</div><div class="value num">${fmt(net)}</div><div class="sub">após IR regressivo (renda fixa)</div></div>
     <div class="card kpi"><div class="label">Liquidez imediata</div><div class="value num">${fmt(imed)}</div><div class="sub">resgatável em até D+1 (líquido)</div></div>
   </div>
   <div style="height:16px"></div>
@@ -841,6 +1031,8 @@ function renderInv(){
         <td class="r"><button class="btn sm" data-act="editinv" data-id="${i.id}">Editar</button></td></tr>`).join('')}</tbody>
     </table></div>` : `<div class="empty">${invTab==='ativos'?'Nenhuma aplicação ativa.':'Nenhuma aplicação resgatada.'}${invTab==='ativos'?'<br><button class="btn primary" data-act="newinv">+ Nova aplicação</button>':''}</div>`}
   </div>
+  <div style="height:16px"></div>
+  ${rvCard()}
   <div style="height:16px"></div>
   <div class="grid three">
     <div class="card"><h3>Por liquidez</h3>${liqSummary(actAll)}</div>
@@ -876,6 +1068,7 @@ function invForm(inv){
       ${['poupanca','variavel'].includes(inv.indexer)?'<div></div>':`<label>${ix.rateLabel}<input name="rate" inputmode="decimal" value="${esc(String(inv.rate).replace('.',','))}"><span class="hint">${ix.hint}</span></label>`}
       <label>Valor aplicado<input name="amount" inputmode="decimal" required value="${inv.amount!==''?String(inv.amount).replace('.',','):''}" placeholder="0,00"></label>
       <label>Data da aplicação<input name="date" type="date" required value="${inv.date}"></label>
+      ${inv.indexer==='variavel'?`<div class="full note">Para FIIs, ações e ETFs, prefira <b>+ Ativo</b> na seção Renda variável: lá o sistema controla cotas, preço médio, cotação e proventos.</div>`:''}
       ${inv.indexer==='variavel'?`<label class="full">Valor atual <span class="hint">atualize manualmente</span><input name="current" inputmode="decimal" value="${inv.current?String(inv.current).replace('.',','):''}" placeholder="0,00"></label>`:''}
       <label>Liquidez<select name="liquidity" id="i_liq">${Object.entries(LIQ).map(([k,v])=>`<option value="${k}" ${inv.liquidity===k?'selected':''}>${v}</option>`).join('')}</select></label>
       ${inv.liquidity==='dx'?`<label>Dias para resgate (D+)<input name="liqDays" type="number" min="0" value="${esc(inv.liqDays)}"></label>`:'<div></div>'}
@@ -983,7 +1176,9 @@ function loadSample(){
     {id:uid(),name:'Carteira de FIIs',institution:'XP',kind:'FII',indexer:'variavel',rate:0,amount:4000,current:4230,date:ago(250),maturity:'',liquidity:'dx',liqDays:2,taxFree:true}
   ];
   const loans=[{id:uid(),kind:'veicular',name:'Carro',lender:'Banco Toyota',category:'Transporte',method:'boleto',mode:'fixed',amount:1450,count:48,firstDate:d(addMonths(cur,-10),15),startMonth:addMonths(cur,-2),notes:'',versions:[]}];
-  S = Object.assign(DEFAULT(), {settings:S.settings, categories:S.categories, cards:[nu,it], tx, invest, loans, paid:{[nu.id]:{[prev]:true,[prev2]:true},[it.id]:{[prev]:true,[prev2]:true}}});
+  const mx={id:uid(),ticker:'MXRF11',name:'Maxi Renda',kind:'FII',institution:'Itaú',price:9.05,priceAt:t,ops:[{id:uid(),type:'buy',date:ago(150),qty:100,price:9.40,fees:0},{id:uid(),type:'buy',date:ago(60),qty:50,price:9.10,fees:0}],divs:[]};
+  for(const k of [prev2,prev]){ const dv={id:uid(),date:d(k,14),kind:'Rendimento',perShare:0.09,qty:150,total:13.5}; dv.txId=uid(); mx.divs.push(dv); tx.push({id:dv.txId,type:'in',desc:'Rendimento MXRF11',amount:13.5,date:dv.date,category:'Rendimentos',method:'outro',assetId:mx.id,divId:dv.id}); }
+  S = Object.assign(DEFAULT(), {settings:S.settings, categories:S.categories, cards:[nu,it], tx, invest, loans, assets:[mx], paid:{[nu.id]:{[prev]:true,[prev2]:true},[it.id]:{[prev]:true,[prev2]:true}}});
   save(); rerender(); toast('Dados de exemplo carregados');
 }
 
@@ -1014,6 +1209,11 @@ document.addEventListener('click', e=>{
     case 'togglepaid': { S.paid[id]=S.paid[id]||{}; const m=el.dataset.m; S.paid[id][m]=!S.paid[id][m]; save(); rerender(); break; }
     case 'newinv': invForm(); break;
     case 'newloan': loanForm(); break;
+    case 'rvnew': rvAssetForm(); break;
+    case 'rvop': rvOpForm(S.assets.find(a=>a.id===id)); break;
+    case 'rvdiv': rvDivForm(S.assets.find(a=>a.id===id)); break;
+    case 'rvprice': rvPriceForm(S.assets.find(a=>a.id===id)); break;
+    case 'rvdetail': rvDetail(S.assets.find(a=>a.id===id)); break;
     case 'editloan': loanForm(structuredClone(S.loans.find(l=>l.id===id))); break;
     case 'updloan': loanUpdateForm(S.loans.find(l=>l.id===id)); break;
     case 'selloan': selLoan=id; if(el.dataset.go){ location.hash='financiamentos'; } rerender(); break;
