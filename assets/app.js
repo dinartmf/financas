@@ -252,6 +252,10 @@ function entries(){
   }
   return out;
 }
+// formas de pagamento das despesas (ordem fixa = cor fixa)
+const OUT_METHODS = ['pix','debito','credito','boleto'];
+const METHOD_LABEL = {pix:'Pix', debito:'Débito', credito:'Crédito', boleto:'Boleto', outro:'Outro'};
+const METHOD_COLOR = {pix:'var(--s3)', debito:'var(--s1)', credito:'var(--s2)', boleto:'var(--s4)'};
 const monthOf = e => S.settings.view==='caixa' ? e.cashMonth : e.compMonth;
 function invoiceTotal(cardId, key, all){ return (all||entries()).filter(e=>e.cardId===cardId && e.invoice===key).reduce((s,e)=>s+e.amount,0); }
 function invoicePaid(cardId,key){ return !!(S.paid[cardId] && S.paid[cardId][key]); }
@@ -363,7 +367,7 @@ function renderPainel(){
   const invTot = invs.reduce((s,x)=>s+x.s.gross,0);
   const invApl = invs.reduce((s,x)=>s+x.i.amount,0);
 
-  const byMethod = {pix:0,debito:0,credito:0};
+  const byMethod = Object.fromEntries(OUT_METHODS.map(k=>[k,0]));
   m.filter(e=>e.tx.type==='out').forEach(e=>byMethod[e.tx.method]=(byMethod[e.tx.method]||0)+e.amount);
   const byCat = {};
   m.filter(e=>e.tx.type==='out').forEach(e=>byCat[e.tx.category]=(byCat[e.tx.category]||0)+e.amount);
@@ -392,8 +396,8 @@ function renderPainel(){
   <div class="grid two">
     <div class="card"><h3>Receitas × despesas <span class="right">últimos 6 meses</span></h3>${chart6(series)}</div>
     <div class="card"><h3>Despesas por forma de pagamento</h3>
-      ${des? `<div class="stack">${['pix','debito','credito'].filter(k=>byMethod[k]>0).map((k,i)=>`<div data-tip="${{pix:'Pix',debito:'Débito',credito:'Crédito'}[k]}: ${fmt(byMethod[k])}" style="width:${byMethod[k]/des*100}%;background:var(--s${{pix:3,debito:1,credito:2}[k]})"></div>`).join('')}</div>
-      <div class="legend">${['pix','debito','credito'].map(k=>`<span><i style="background:var(--s${{pix:3,debito:1,credito:2}[k]})"></i>${{pix:'Pix',debito:'Débito',credito:'Crédito'}[k]} <b class="num">${fmt(byMethod[k])}</b></span>`).join('')}</div>`:'<div class="muted small">Sem despesas neste mês.</div>'}
+      ${des? `<div class="stack">${OUT_METHODS.filter(k=>byMethod[k]>0).map(k=>`<div data-tip="${METHOD_LABEL[k]}: ${fmt(byMethod[k])}" style="width:${byMethod[k]/des*100}%;background:${METHOD_COLOR[k]}"></div>`).join('')}</div>
+      <div class="legend">${OUT_METHODS.map(k=>`<span><i style="background:${METHOD_COLOR[k]}"></i>${METHOD_LABEL[k]} <b class="num">${fmt(byMethod[k])}</b></span>`).join('')}</div>`:'<div class="muted small">Sem despesas neste mês.</div>'}
       <h3 style="margin-top:22px">Faturas que vencem em ${monthShort(curMonth)}</h3>
       ${S.cards.length? `<table><tbody>${S.cards.map(c=>{const v=invoiceTotal(c.id,curMonth,all); const p=invoicePaid(c.id,curMonth); return `<tr><td>${esc(c.name)}<div class="small muted">vence ${dateBR(dueDate(c,curMonth))}</div></td><td class="r num">${fmt(v)}</td><td class="r">${v? `<span class="pill ${p?'ok':'open'}">${p?'Paga':'Aberta'}</span>`:''}</td></tr>`}).join('')}</tbody></table>` : '<div class="muted small">Nenhum cartão cadastrado. <button class="linkbtn" data-act="newcard">Cadastrar</button></div>'}
     </div>
@@ -455,7 +459,7 @@ function renderLanc(){
   <div class="filters">
     <input id="fq" placeholder="Buscar descrição…" value="${esc(F.q)}" style="flex:1;min-width:180px">
     <select id="ftype"><option value="">Receitas e despesas</option><option value="in" ${F.type==='in'?'selected':''}>Receitas</option><option value="out" ${F.type==='out'?'selected':''}>Despesas</option></select>
-    <select id="fmethod"><option value="">Todas as formas</option>${['pix','debito','credito'].map(k=>`<option value="${k}" ${F.method===k?'selected':''}>${{pix:'Pix',debito:'Débito',credito:'Crédito'}[k]}</option>`).join('')}</select>
+    <select id="fmethod"><option value="">Todas as formas</option>${[...OUT_METHODS,'outro'].map(k=>`<option value="${k}" ${F.method===k?'selected':''}>${METHOD_LABEL[k]}</option>`).join('')}</select>
     <select id="fcat"><option value="">Todas as categorias</option>${allCats.map(c=>`<option ${F.cat===c?'selected':''}>${esc(c)}</option>`).join('')}</select>
     ${S.cards.length?`<select id="fcard"><option value="">Todos os cartões</option>${S.cards.map(c=>`<option value="${c.id}" ${F.card===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select>`:''}
   </div>
@@ -466,7 +470,7 @@ function renderLanc(){
         <td class="num">${dateBR(t.date)}</td>
         <td><b style="font-weight:600">${esc(t.desc)}</b>${e.n>1?` <span class="pill">${e.i}/${e.n}</span>`:''}${isMonthKey(t.refMonth)&&t.refMonth!==monthKey(t.date)?` <span class="pill" title="Mês de referência (competência)">ref. ${monthShort(e.compMonth)}</span>`:''}${c?`<div class="small muted">${esc(c.name)} · fatura ${monthShort(e.invoice)}</div>`:''}</td>
         <td>${esc(t.category)}</td>
-        <td><span class="pill ${t.method}">${{pix:'Pix',debito:'Débito',credito:'Crédito',outro:'Outro'}[t.method]||t.method}</span></td>
+        <td><span class="pill ${t.method}">${esc(METHOD_LABEL[t.method]||t.method)}</span></td>
         <td class="r num ${t.type==='in'?'pos':'neg'}" style="font-weight:600">${t.type==='in'?'+':'−'} ${fmt(e.amount)}</td>
         <td class="r"><button class="btn sm" data-act="edittx" data-id="${t.id}">Editar</button></td></tr>`}).join('')}</tbody>
     </table></div>
@@ -487,7 +491,7 @@ function txForm(t){
   const refOptions = (date, sel) => { const base=monthKey(date||todayISO()); const ks=[]; for(let k=-12;k<=3;k++) ks.push(addMonths(base,k)); if(sel && !ks.includes(sel)) ks.push(sel); ks.sort(); return ks.map(k=>`<option value="${k}" ${k===sel?'selected':''}>${monthLabel(k)}</option>`).join(''); };
   const draw = () => {
     const cats = S.categories[type];
-    const method = $('#t_method')?.value || t.method;
+    const method = t.method; // não ler do DOM: o modal anterior pode ainda estar lá
     openModal(`
       <h2>${isNew?'Novo lançamento':'Editar lançamento'}</h2>
       <form class="form" id="txf">
@@ -496,7 +500,7 @@ function txForm(t){
         <label>Valor ${method==='credito'?'<span class="hint">(total da compra)</span>':''}<input name="amount" required inputmode="decimal" value="${t.amount!==''?String(t.amount).replace('.',','):''}" placeholder="0,00"></label>
         <label>Data${method==='credito'?' da compra':''}<input name="date" type="date" required value="${t.date}"></label>
         <label>Categoria<select name="category">${cats.map(c=>`<option ${t.category===c?'selected':''}>${esc(c)}</option>`).join('')}</select></label>
-        <label>Forma<select name="method" id="t_method">${(type==='out'?[['pix','Pix'],['debito','Débito'],['credito','Cartão de crédito']]:[['pix','Pix'],['outro','Outro (TED, dinheiro…)']]).map(([k,l])=>`<option value="${k}" ${method===k?'selected':''}>${l}</option>`).join('')}</select></label>
+        <label>Forma<select name="method" id="t_method">${(type==='out'?[['pix','Pix'],['debito','Débito'],['credito','Cartão de crédito'],['boleto','Boleto']]:[['pix','Pix'],['outro','Outro (TED, dinheiro…)']]).map(([k,l])=>`<option value="${k}" ${method===k?'selected':''}>${l}</option>`).join('')}</select></label>
         ${method==='credito' && type==='out' ? (S.cards.length? `
           <label>Cartão<select name="cardId">${S.cards.map(c=>`<option value="${c.id}" ${t.cardId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label>
           <label>Parcelas<select name="installments">${Array.from({length:24},(_,i)=>i+1).map(n=>`<option value="${n}" ${Number(t.installments)===n?'selected':''}>${n===1?'À vista':n+'x'}</option>`).join('')}</select></label>
@@ -745,7 +749,7 @@ function loadSample(){
   for(const k of [prev2,prev,cur]){
     tx.push({id:uid(),type:'in',desc:'Salário',amount:9500,date:d(k,5),category:'Salário',method:'pix',refMonth:addMonths(k,-1)});
     tx.push({id:uid(),type:'out',desc:'Aluguel',amount:2200,date:d(k,8),category:'Moradia',method:'pix'});
-    tx.push({id:uid(),type:'out',desc:'Energia',amount:k===cur?310:280,date:d(k,12),category:'Contas (luz/água/internet)',method:'pix'});
+    tx.push({id:uid(),type:'out',desc:'Energia',amount:k===cur?310:280,date:d(k,12),category:'Contas (luz/água/internet)',method:'boleto'});
     tx.push({id:uid(),type:'out',desc:'Internet',amount:119.9,date:d(k,15),category:'Contas (luz/água/internet)',method:'debito'});
     tx.push({id:uid(),type:'out',desc:'Supermercado',amount:k===prev?780:640,date:d(k,9),category:'Mercado',method:'credito',cardId:nu.id,installments:1});
     tx.push({id:uid(),type:'out',desc:'Netflix',amount:44.9,date:d(k,2),category:'Assinaturas',method:'credito',cardId:it.id,installments:1});
