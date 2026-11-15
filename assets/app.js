@@ -44,7 +44,7 @@ function sanitizeState(d){
     cards: arr(d.cards), tx: arr(d.tx), invest: arr(d.invest),
     paid: d.paid && typeof d.paid==='object' ? d.paid : {}
   });
-  out.tx.forEach(t=>{ t.amount=Number(t.amount)||0; t.installments=Math.min(48,Math.max(1,Number(t.installments)||1)); t.date=String(t.date||'').slice(0,10); });
+  out.tx.forEach(t=>{ t.amount=Number(t.amount)||0; t.installments=Math.min(48,Math.max(1,Number(t.installments)||1)); t.date=String(t.date||'').slice(0,10); if(!isMonthKey(t.refMonth)) delete t.refMonth; });
   out.invest.forEach(i=>{ i.amount=Number(i.amount)||0; });
   out.cards.forEach(c=>{ c.closeDay=Math.min(31,Math.max(1,Number(c.closeDay)||1)); c.dueDay=Math.min(31,Math.max(1,Number(c.dueDay)||1)); });
   return out;
@@ -225,6 +225,11 @@ function invoiceMonth(card, iso){
   if(day >= card.closeDay) closeKey = addMonths(closeKey,1);
   return card.dueDay <= card.closeDay ? addMonths(closeKey,1) : closeKey;
 }
+// mês de referência (competência): informado no lançamento ou, se ausente, o mês da data
+const isMonthKey = v => typeof v==='string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(v);
+const refMonthOf = t => isMonthKey(t.refMonth) ? t.refMonth : monthKey(t.date);
+// sugestão automática: salário recebido em um mês se refere ao mês anterior
+const autoRefMonth = (type, category, date) => (type==='in' && /sal[aá]rio/i.test(category||'') && date) ? addMonths(monthKey(date),-1) : (date? monthKey(date) : monthKey(todayISO()));
 // expande lançamentos (parcelas) em "entradas" mensais
 function entries(){
   const out=[];
@@ -235,7 +240,7 @@ function entries(){
     const first = Math.round((t.amount - base*(n-1))*100)/100;
     const inv0 = card ? invoiceMonth(card, t.date) : null;
     for(let i=0;i<n;i++){
-      const comp = addMonths(monthKey(t.date), i);
+      const comp = addMonths(refMonthOf(t), i);
       out.push({
         tx:t, i:i+1, n, amount: i===0?first:base,
         compMonth: comp,
@@ -423,7 +428,7 @@ function chart6(series){
 }
 function barPath(x,y,w,h){ const r=Math.min(4,w/2,h); return `M${x},${y+h}V${y+r}Q${x},${y} ${x+r},${y}H${x+w-r}Q${x+w},${y} ${x+w},${y+r}V${y+h}Z`; }
 function niceMax(v){ const p=Math.pow(10,Math.floor(Math.log10(v))); const n=v/p; return (n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10)*p; }
-function compact(v){ return v>=1e6? (v/1e6).toLocaleString('pt-BR',{maximumFractionDigits:1})+' mi' : v>=1e3? (v/1e3).toLocaleString('pt-BR',{maximumFractionDigits:1})+' mil' : v.toLocaleString('pt-BR',{maximumFractionDigits:0}); }
+function compact(v){ return v>=1e6? (v/1e6).toLocaleString('pt-BR',{maximumFractionDigits:1})+' mi' : v>=1e3? (v/1e3).toLocaleString('pt-BR',{maximumFractionDigits:1})+' mil' : v.toLocaleString('pt-BR',{maximumFractionDigits:v<10?2:0}); }
 function liqSummary(invs){
   if(!invs.length) return '<div class="muted small">Nenhum investimento cadastrado. <a class="linkbtn" href="#investimentos">Cadastrar</a></div>';
   const b=[0,0,0,0]; invs.forEach(x=>b[liqBucket(x.s.wait)]+=x.s.gross);
@@ -459,7 +464,7 @@ function renderLanc(){
       <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Forma</th><th class="r">Valor</th><th></th></tr></thead>
       <tbody>${list.map(e=>{const t=e.tx; const c=e.cardId?cardById(e.cardId):null; return `<tr>
         <td class="num">${dateBR(t.date)}</td>
-        <td><b style="font-weight:600">${esc(t.desc)}</b>${e.n>1?` <span class="pill">${e.i}/${e.n}</span>`:''}${c?`<div class="small muted">${esc(c.name)} · fatura ${monthShort(e.invoice)}</div>`:''}</td>
+        <td><b style="font-weight:600">${esc(t.desc)}</b>${e.n>1?` <span class="pill">${e.i}/${e.n}</span>`:''}${isMonthKey(t.refMonth)&&t.refMonth!==monthKey(t.date)?` <span class="pill" title="Mês de referência (competência)">ref. ${monthShort(e.compMonth)}</span>`:''}${c?`<div class="small muted">${esc(c.name)} · fatura ${monthShort(e.invoice)}</div>`:''}</td>
         <td>${esc(t.category)}</td>
         <td><span class="pill ${t.method}">${{pix:'Pix',debito:'Débito',credito:'Crédito',outro:'Outro'}[t.method]||t.method}</span></td>
         <td class="r num ${t.type==='in'?'pos':'neg'}" style="font-weight:600">${t.type==='in'?'+':'−'} ${fmt(e.amount)}</td>
@@ -468,7 +473,7 @@ function renderLanc(){
     <div style="display:flex;gap:18px;justify-content:flex-end;padding:12px 10px;border-top:1px solid var(--line)" class="num"><span>Receitas <b class="pos">${fmt(rec)}</b></span><span>Despesas <b class="neg">${fmt(des)}</b></span><span>Saldo <b class="${rec-des>=0?'pos':'neg'}">${fmt(rec-des)}</b></span></div>`
     : `<div class="empty">Nenhum lançamento em ${monthLabel(curMonth)}${F.q||F.type||F.method||F.cat||F.card?' com esses filtros':''}.<br><button class="btn primary" data-act="newtx">+ Novo lançamento</button></div>`}
   </div>
-  <p class="small muted">Na visão <b>Caixa</b>, compras no crédito aparecem no mês em que a fatura vence. Na visão <b>Competência</b>, aparecem no mês da compra (cada parcela no seu mês).</p>`;
+  <p class="small muted">Na visão <b>Caixa</b>, compras no crédito aparecem no mês em que a fatura vence. Na visão <b>Competência</b>, cada lançamento conta no seu <b>mês de referência</b> — por exemplo, o salário recebido em 06/11 referente a outubro conta em outubro (parcelas no crédito seguem mês a mês a partir da referência).</p>`;
   const bind=(id,k)=>{ const el=$('#'+id); if(el) el.addEventListener(id==='fq'?'input':'change',ev=>{F[k]=ev.target.value; const pos=ev.target.selectionStart; renderLanc(); if(id==='fq'){const n=$('#fq'); n.focus(); n.setSelectionRange(pos,pos);} }); };
   bind('fq','q');bind('ftype','type');bind('fmethod','method');bind('fcat','cat');bind('fcard','card');
 }
@@ -476,6 +481,10 @@ function renderLanc(){
 function txForm(t){
   const isNew=!t; t = t || {type:'out',desc:'',amount:'',date:todayISO(),category:'',method:'pix',cardId:S.cards[0]?.id||'',installments:1,notes:''};
   let type=t.type;
+  // se o usuário escolher o mês manualmente, paramos de sugerir automaticamente
+  let refTouched = !isNew && isMonthKey(t.refMonth) && t.refMonth!==autoRefMonth(t.type,t.category,t.date);
+  const curRef = () => isMonthKey(t.refMonth) ? t.refMonth : autoRefMonth(type, t.category || S.categories[type][0], t.date);
+  const refOptions = (date, sel) => { const base=monthKey(date||todayISO()); const ks=[]; for(let k=-12;k<=3;k++) ks.push(addMonths(base,k)); if(sel && !ks.includes(sel)) ks.push(sel); ks.sort(); return ks.map(k=>`<option value="${k}" ${k===sel?'selected':''}>${monthLabel(k)}</option>`).join(''); };
   const draw = () => {
     const cats = S.categories[type];
     const method = $('#t_method')?.value || t.method;
@@ -492,17 +501,24 @@ function txForm(t){
           <label>Cartão<select name="cardId">${S.cards.map(c=>`<option value="${c.id}" ${t.cardId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label>
           <label>Parcelas<select name="installments">${Array.from({length:24},(_,i)=>i+1).map(n=>`<option value="${n}" ${Number(t.installments)===n?'selected':''}>${n===1?'À vista':n+'x'}</option>`).join('')}</select></label>
           <div class="full note" id="invHint"></div>` : `<div class="full note">Cadastre um cartão de crédito primeiro (aba Cartões).</div>`) : ''}
+        <label>Mês de referência <span class="hint">competência</span><select name="refMonth" id="t_ref">${refOptions(t.date, curRef())}</select></label>
+        <div class="small muted" id="refHint" style="align-self:end;padding-bottom:10px"></div>
         <label class="full">Observação <span class="hint">opcional</span><input name="notes" value="${esc(t.notes||'')}"></label>
       </form>
       <div class="actions">${!isNew?`<button class="btn danger left" data-m="del">Excluir</button>`:''}<button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok">${isNew?'Adicionar':'Salvar'}</button></div>`);
     const f=$('#txf');
-    f.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{ t={...t,...readForm(f)}; type=b.dataset.type; t.category=''; if(type==='in'&&t.method!=='pix') t.method='pix'; draw(); });
+    f.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{ t={...t,...readForm(f)}; type=b.dataset.type; t.category=''; if(!refTouched) t.refMonth=autoRefMonth(type,S.categories[type][0],t.date); if(type==='in'&&t.method!=='pix') t.method='pix'; draw(); });
     $('#t_method').onchange=()=>{ t={...t,...readForm(f)}; t.method=$('#t_method').value; draw(); };
     const hint=()=>{ const h=$('#invHint'); if(!h) return; const d=readForm(f); const c=cardById(d.cardId); if(!c||!d.date) return; const inv=invoiceMonth(c,d.date); const n=Number(d.installments)||1; const a=parseNum(d.amount); h.innerHTML=`Entra na fatura de <b>${monthLabel(inv)}</b> (vence ${dateBR(dueDate(c,inv))})${n>1?` · ${n}x de <b>${fmt(a/n)}</b> até ${monthShort(addMonths(inv,n-1))}`:''}.`; };
     f.addEventListener('input',hint); f.addEventListener('change',hint); hint();
+    const refHint=()=>{ const d=readForm(f); const el=$('#refHint'); if(!el||!d.date) return; el.textContent = d.refMonth && d.refMonth!==monthKey(d.date) ? `Conta em ${monthShort(d.refMonth)} na visão Competência e em ${monthShort(monthKey(d.date))} na visão Caixa.` : ''; };
+    $('#t_ref').addEventListener('change',()=>{ refTouched=true; t.refMonth=$('#t_ref').value; refHint(); });
+    const autoUpdate=()=>{ const d=readForm(f); if(refTouched) { const sel=$('#t_ref').value; $('#t_ref').innerHTML=refOptions(d.date, sel); } else { const a=autoRefMonth(type,d.category,d.date); t.refMonth=a; $('#t_ref').innerHTML=refOptions(d.date, a); } refHint(); };
+    f.date.addEventListener('change',autoUpdate); f.category.addEventListener('change',autoUpdate); refHint();
     modalActions({
       ok:()=>{ const d=readForm(f); if(!d.desc.trim()) return toast('Informe a descrição'); const amt=parseNum(d.amount); if(!(amt>0)) return toast('Informe um valor maior que zero');
         const rec={...t, type, desc:d.desc.trim(), amount:Math.round(amt*100)/100, date:d.date, category:d.category, method:d.method, notes:d.notes};
+        if(isMonthKey(d.refMonth) && d.refMonth!==monthKey(d.date)) rec.refMonth=d.refMonth; else delete rec.refMonth;
         if(d.method==='credito'){ if(!S.cards.length) return toast('Cadastre um cartão primeiro'); rec.cardId=d.cardId; rec.installments=Number(d.installments)||1; } else { delete rec.cardId; rec.installments=1; }
         if(isNew){ rec.id=uid(); S.tx.push(rec); } else { const i=S.tx.findIndex(x=>x.id===t.id); S.tx[i]=rec; }
         save(); closeModal(); rerender(); toast(isNew?'Lançamento adicionado':'Lançamento atualizado'); },
@@ -727,7 +743,7 @@ function loadSample(){
   const it={id:uid(),name:'Itaú Visa',limit:12000,closeDay:25,dueDay:5,color:CARD_COLORS[2]};
   const tx=[];
   for(const k of [prev2,prev,cur]){
-    tx.push({id:uid(),type:'in',desc:'Salário',amount:9500,date:d(k,5),category:'Salário',method:'pix'});
+    tx.push({id:uid(),type:'in',desc:'Salário',amount:9500,date:d(k,5),category:'Salário',method:'pix',refMonth:addMonths(k,-1)});
     tx.push({id:uid(),type:'out',desc:'Aluguel',amount:2200,date:d(k,8),category:'Moradia',method:'pix'});
     tx.push({id:uid(),type:'out',desc:'Energia',amount:k===cur?310:280,date:d(k,12),category:'Contas (luz/água/internet)',method:'pix'});
     tx.push({id:uid(),type:'out',desc:'Internet',amount:119.9,date:d(k,15),category:'Contas (luz/água/internet)',method:'debito'});
