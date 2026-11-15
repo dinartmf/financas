@@ -28,11 +28,24 @@ jobs:
           persist-credentials: false
 
       - name: Verificar que nenhuma chave secreta foi commitada
+        shell: python
         run: |
-          if grep -RInE "service_role|sb_secret_" --include="*.js" --include="*.html" . ; then
-            echo "::error::Encontrada chave secreta do Supabase no código. Remova antes de publicar."
-            exit 1
-          fi
+          import base64, json, pathlib, re, sys
+          achou = False
+          for f in pathlib.Path('.').rglob('*'):
+              if '.git' in f.parts or not f.is_file() or f.suffix not in {'.js', '.html', '.json'}:
+                  continue
+              txt = f.read_text(errors='ignore')
+              if re.search(r'sb_secret_[A-Za-z0-9_-]{10,}', txt):
+                  print(f'::error file={f}::Chave secreta do Supabase (sb_secret_) encontrada'); achou = True
+              for tok in re.findall(r'eyJ[A-Za-z0-9_-]+\.(eyJ[A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+', txt):
+                  try:
+                      claims = json.loads(base64.urlsafe_b64decode(tok + '=' * (-len(tok) % 4)))
+                  except Exception:
+                      continue
+                  if claims.get('role') == 'service_role':
+                      print(f'::error file={f}::Chave service_role do Supabase encontrada'); achou = True
+          sys.exit(1 if achou else 0)
 
       - name: Montar pasta publicada (somente arquivos do site)
         run: |
