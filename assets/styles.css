@@ -164,3 +164,15 @@ tbody tr:hover{background:var(--surface-2)}
 .secret{word-break:break-all;background:var(--surface-2);padding:2px 6px;border-radius:5px}
 details summary{cursor:pointer;color:var(--accent);font-weight:600}
 @media (max-width:900px){ .userbox{display:none} }
+
+/* ---------- financiamentos ---------- */
+.loan-card{cursor:pointer;transition:border-color .15s}
+.loan-card:hover{border-color:var(--ink-3)}
+.loan-card.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.loan-card .track{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden}
+.loan-card .fill{height:100%;background:var(--accent);border-radius:0 4px 4px 0}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+@media (max-width:1100px){ nav a{padding:0 8px} nav a svg{display:none} }
+.fin-detail{grid-template-columns:minmax(0,2fr) minmax(0,1fr)}
+table.compact th,table.compact td{padding:8px 6px;font-size:13px;white-space:nowrap}
+@media (max-width:900px){ .fin-detail{grid-template-columns:1fr} }

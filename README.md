@@ -59,6 +59,7 @@ Em **Project Settings → API Keys** (ou no botão **Connect**), copie:
 - **Painel:** receitas, despesas, saldo do mês, faturas a vencer, despesas por categoria e investimentos por liquidez. Alterne entre visão **Caixa** (crédito no mês da fatura) e **Competência** (crédito no mês da compra).
 - **Lançamentos:** Pix, débito e crédito (até 24 parcelas). Parcelas são distribuídas automaticamente nas faturas pelo dia de fechamento do cartão.
 - **Cartões:** limite, fechamento, vencimento, faturas futuras e marcação de fatura paga.
+- **Financiamentos:** veicular/pessoal com parcela fixa (informe valor, quantidade e 1ª data) ou imobiliário importando o **PDF de evolução do saldo devedor** do banco (SAC, parcelas decrescentes). As parcelas entram sozinhas nos lançamentos. Após uma amortização, use **Atualizar com novo PDF** para ver a comparação antes/depois e a economia. O PDF é lido no navegador (pdf.js embutido em `assets/vendor/pdfjs`) e nunca é enviado; nome, CPF e endereço são descartados.
 - **Investimentos:** tipo, instituição, indexador e taxa, liquidez, vencimento, isenção de IR; valor estimado hoje e no vencimento (líquido de IR); comparador CDB × LCI/LCA.
 - **Ajustes:** CDI/Selic/IPCA usados nas projeções, categorias, backup (baixar/importar JSON), histórico automático das últimas 50 versões, sair de todos os dispositivos.
 

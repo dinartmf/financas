@@ -27,7 +27,7 @@ const DEFAULT = () => ({
     out:['Alimentação','Mercado','Moradia','Contas (luz/água/internet)','Transporte','Saúde','Educação','Lazer','Assinaturas','Compras','Impostos','Outros'],
     in:['Salário','Freelance','Rendimentos','Reembolso','Outros']
   },
-  cards:[], tx:[], invest:[], paid:{}
+  cards:[], tx:[], invest:[], loans:[], paid:{}
 });
 let S = DEFAULT();
 let versao = null;          // versão da linha no banco (controle de concorrência)
@@ -41,7 +41,7 @@ function sanitizeState(d){
   const out = Object.assign(base, {
     settings: Object.assign(base.settings, d.settings && typeof d.settings==='object' ? d.settings : {}),
     categories: d.categories && Array.isArray(d.categories.out) && Array.isArray(d.categories.in) ? {out:d.categories.out.map(String), in:d.categories.in.map(String)} : base.categories,
-    cards: arr(d.cards), tx: arr(d.tx), invest: arr(d.invest),
+    cards: arr(d.cards), tx: arr(d.tx), invest: arr(d.invest), loans: arr(d.loans).filter(l=>l && typeof l==='object' && l.id),
     paid: d.paid && typeof d.paid==='object' ? d.paid : {}
   });
   out.tx.forEach(t=>{ t.amount=Number(t.amount)||0; t.installments=Math.min(48,Math.max(1,Number(t.installments)||1)); t.date=String(t.date||'').slice(0,10); if(!isMonthKey(t.refMonth)) delete t.refMonth; });
@@ -250,6 +250,7 @@ function entries(){
       });
     }
   }
+  out.push(...loanEntries());
   return out;
 }
 // formas de pagamento das despesas (ordem fixa = cor fixa)
@@ -338,7 +339,7 @@ const BUCKETS = ['Imediata (até D+1)','Até 30 dias','Até 1 ano','Acima de 1 a
 
 /* ================== roteamento & render ================== */
 let curMonth = monthKey(todayISO());
-const VIEWS = {painel:renderPainel, lancamentos:renderLanc, cartoes:renderCartoes, investimentos:renderInv, ajustes:renderAjustes};
+const VIEWS = {painel:renderPainel, lancamentos:renderLanc, cartoes:renderCartoes, financiamentos:renderFin, investimentos:renderInv, ajustes:renderAjustes};
 function route(){
   const v = (location.hash||'#painel').slice(1);
   const view = VIEWS[v] ? v : 'painel';
@@ -468,11 +469,11 @@ function renderLanc(){
       <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th>Forma</th><th class="r">Valor</th><th></th></tr></thead>
       <tbody>${list.map(e=>{const t=e.tx; const c=e.cardId?cardById(e.cardId):null; return `<tr>
         <td class="num">${dateBR(t.date)}</td>
-        <td><b style="font-weight:600">${esc(t.desc)}</b>${e.n>1?` <span class="pill">${e.i}/${e.n}</span>`:''}${isMonthKey(t.refMonth)&&t.refMonth!==monthKey(t.date)?` <span class="pill" title="Mês de referência (competência)">ref. ${monthShort(e.compMonth)}</span>`:''}${c?`<div class="small muted">${esc(c.name)} · fatura ${monthShort(e.invoice)}</div>`:''}</td>
+        <td><b style="font-weight:600">${esc(t.desc)}</b>${e.n>1?` <span class="pill">${e.i}/${e.n}</span>`:''}${isMonthKey(t.refMonth)&&t.refMonth!==monthKey(t.date)?` <span class="pill" title="Mês de referência (competência)">ref. ${monthShort(e.compMonth)}</span>`:''}${c?`<div class="small muted">${esc(c.name)} · fatura ${monthShort(e.invoice)}</div>`:''}${t.loanId?`<div class="small muted">Financiamento · lançado automaticamente${t.projected?' · valor estimado':''}</div>`:''}</td>
         <td>${esc(t.category)}</td>
         <td><span class="pill ${t.method}">${esc(METHOD_LABEL[t.method]||t.method)}</span></td>
         <td class="r num ${t.type==='in'?'pos':'neg'}" style="font-weight:600">${t.type==='in'?'+':'−'} ${fmt(e.amount)}</td>
-        <td class="r"><button class="btn sm" data-act="edittx" data-id="${t.id}">Editar</button></td></tr>`}).join('')}</tbody>
+        <td class="r">${t.loanId?`<button class="btn sm" data-act="selloan" data-id="${t.loanId}" data-go="1">Ver</button>`:`<button class="btn sm" data-act="edittx" data-id="${t.id}">Editar</button>`}</td></tr>`}).join('')}</tbody>
     </table></div>
     <div style="display:flex;gap:18px;justify-content:flex-end;padding:12px 10px;border-top:1px solid var(--line)" class="num"><span>Receitas <b class="pos">${fmt(rec)}</b></span><span>Despesas <b class="neg">${fmt(des)}</b></span><span>Saldo <b class="${rec-des>=0?'pos':'neg'}">${fmt(rec-des)}</b></span></div>`
     : `<div class="empty">Nenhum lançamento em ${monthLabel(curMonth)}${F.q||F.type||F.method||F.cat||F.card?' com esses filtros':''}.<br><button class="btn primary" data-act="newtx">+ Novo lançamento</button></div>`}
@@ -590,6 +591,216 @@ function cardForm(c){
       save(); closeModal(); rerender(); },
     del:()=>{ const n=S.tx.filter(t=>t.cardId===c.id).length; confirmBox(`Excluir o cartão "${esc(c.name)}"?${n?` As ${n} compras dele também serão excluídas.`:''}`,()=>{ S.tx=S.tx.filter(t=>t.cardId!==c.id); S.cards=S.cards.filter(x=>x.id!==c.id); delete S.paid[c.id]; save(); rerender(); }); }
   });
+}
+
+/* ---------- Financiamentos ---------- */
+// Dois modos:
+//  fixed    → parcela fixa (veicular/Price): valor × quantidade a partir da 1ª data
+//  schedule → tabela importada do PDF do banco (SAC/decrescente), atualizável após amortizações
+const LOAN_KINDS = {veicular:'Veicular', imobiliario:'Imobiliário', pessoal:'Pessoal / consignado', outro:'Outro'};
+const LOAN_METHODS = ['boleto','debito','pix'];
+function isoAddMonths(iso, n){ let [y,m,d]=iso.split('-').map(Number); m+=n; y+=Math.floor((m-1)/12); m=((m-1)%12+12)%12+1; return `${y}-${pad(m)}-${pad(Math.min(d,new Date(y,m,0).getDate()))}`; }
+function loanRows(l){
+  if(l.mode==='fixed'){
+    const n=Math.max(1,Math.min(600,Number(l.count)||1)), out=[];
+    for(let i=0;i<n;i++) out.push({n:i+1, due:isoAddMonths(l.firstDate,i), amount:Number(l.amount)||0});
+    return out;
+  }
+  return Array.isArray(l.rows) ? l.rows : [];
+}
+const loanTotal = l => l.mode==='fixed' ? Number(l.count)||0 : (l.contract && l.contract.totalCount) || loanRows(l).length;
+function loanSummary(l, rows){
+  rows = rows || loanRows(l);
+  const today=todayISO(), cur=monthKey(today);
+  const paid = rows.filter(r=> l.mode==='fixed' ? r.due < today : !!r.paidAt);
+  const future = rows.filter(r=> !(l.mode==='fixed' ? r.due < today : !!r.paidAt) && monthKey(r.due) >= cur);
+  const next = future[0] || null;
+  const lastPaid = paid[paid.length-1] || null;
+  const saldo = l.mode==='fixed' ? future.reduce((a,r)=>a+r.amount,0) : (lastPaid && lastPaid.saldo!=null ? lastPaid.saldo : (l.contract && l.contract.financed) || 0);
+  return { paidCount: paid.length, remaining: future.length, next, saldo,
+    futureTotal: future.reduce((a,r)=>a+r.amount,0), end: rows.length ? rows[rows.length-1].due : null,
+    projected: rows.filter(r=>r.projected).length };
+}
+function loanEntries(){
+  const out=[];
+  for(const l of (S.loans||[])){
+    const total=loanTotal(l);
+    for(const r of loanRows(l)){
+      if(monthKey(r.due) < (l.startMonth||'0000-00')) continue;
+      const tx={id:`loan:${l.id}:${r.n}`, loanId:l.id, type:'out', desc:`${l.name} — parcela ${r.n}/${total}`, amount:r.amount, date:r.paidAt||r.due, category:l.category, method:l.method, projected:!!r.projected};
+      out.push({tx, i:1, n:1, amount:r.amount, compMonth:monthKey(r.due), cashMonth:monthKey(r.paidAt||r.due), invoice:null, cardId:null, loan:l, row:r});
+    }
+  }
+  return out;
+}
+let selLoan=null;
+function renderFin(){
+  const loans=S.loans||[];
+  if(selLoan && !loans.find(l=>l.id===selLoan)) selLoan=null;
+  if(!selLoan && loans.length) selLoan=loans[0].id;
+  const sums=loans.map(l=>({l,s:loanSummary(l)}));
+  const saldoTot=sums.reduce((a,x)=>a+x.s.saldo,0), futTot=sums.reduce((a,x)=>a+x.s.futureTotal,0);
+  const monthTot=loanEntries().filter(e=>monthOf(e)===curMonth).reduce((a,e)=>a+e.amount,0);
+  const l=loans.find(x=>x.id===selLoan), s=l?loanSummary(l):null;
+  const rows=l?loanRows(l):[];
+  const cur=monthKey(todayISO());
+  const upcoming=rows.filter(r=>monthKey(r.due)>=addMonths(cur,-1)).slice(0,14);
+  $('#main').innerHTML=`
+  <div class="top"><h1>Financiamentos</h1>${monthPicker()}<button class="btn primary" data-act="newloan">+ Financiamento</button></div>
+  <div class="grid kpis">
+    <div class="card kpi"><div class="label">Saldo devedor</div><div class="value num">${fmt(saldoTot)}</div><div class="sub">${loans.length} financiamento${loans.length===1?'':'s'}</div></div>
+    <div class="card kpi"><div class="label">Parcelas em ${monthShort(curMonth)}</div><div class="value num neg">${fmt(monthTot)}</div><div class="sub">já incluídas nas despesas</div></div>
+    <div class="card kpi"><div class="label">Total a pagar</div><div class="value num">${fmt(futTot)}</div><div class="sub">soma das parcelas restantes</div></div>
+    <div class="card kpi"><div class="label">Juros futuros</div><div class="value num">${fmt(Math.max(0,futTot-sums.filter(x=>x.l.mode!=='fixed').reduce((a,x)=>a+x.s.saldo,0)-sums.filter(x=>x.l.mode==='fixed').reduce((a,x)=>a+x.s.futureTotal,0)))}</div><div class="sub">inclui seguros e taxas (financ. com PDF)</div></div>
+  </div>
+  <div style="height:16px"></div>
+  ${loans.length? `<div class="grid cards-grid">${sums.map(({l:x,s:y})=>{const tot=loanTotal(x); const pct2=tot?y.paidCount/tot*100:0; return `
+    <div class="card loan-card ${x.id===selLoan?'on':''}" data-act="selloan" data-id="${x.id}">
+      <div class="small muted">${esc(LOAN_KINDS[x.kind]||x.kind)}${x.lender?' · '+esc(x.lender):''}</div>
+      <div style="font-weight:700;font-size:15px;margin:2px 0 8px">${esc(x.name)}</div>
+      <div class="track"><div class="fill" style="width:${pct2}%"></div></div>
+      <div class="small muted" style="margin-top:6px">${y.paidCount} de ${tot} parcelas pagas</div>
+      <div style="display:flex;justify-content:space-between;margin-top:10px" class="num"><span class="small muted">Próxima</span><b>${y.next?fmt(y.next.amount)+' · '+dateBR(y.next.due):'—'}</b></div>
+    </div>`}).join('')}</div>
+  <div style="height:16px"></div>
+  <div class="grid fin-detail">
+    <div class="card"><h3>${esc(l.name)} <span class="right"><button class="btn sm" data-act="editloan" data-id="${l.id}">Editar</button> ${l.mode==='schedule'?`<button class="btn sm primary" data-act="updloan" data-id="${l.id}">Atualizar com novo PDF</button>`:''}</span></h3>
+      <div class="tablewrap"><table class="compact"><thead><tr><th>Vencimento</th><th>Parcela</th><th class="r">Valor</th>${l.mode==='schedule'?'<th class="r">Amortização</th><th class="r">Juros</th><th class="r">Saldo após</th>':''}<th class="r">Status</th></tr></thead><tbody>
+      ${upcoming.map(r=>{const st=r.paidAt?'<span class="pill ok">Paga</span>':(l.mode==='fixed'&&r.due<todayISO()?'<span class="pill">Venceu</span>':r.projected?'<span class="pill" title="O PDF não trazia esta parcela; valor estimado pela regra SAC">Estimada</span>':'<span class="pill open">A vencer</span>'); return `<tr><td class="num">${dateBR(r.due)}</td><td class="num">${r.n}/${loanTotal(l)}</td><td class="r num"><b>${fmt(r.amount)}</b></td>${l.mode==='schedule'?`<td class="r num">${fmt(r.amort)}</td><td class="r num">${fmt(r.juros)}</td><td class="r num">${fmt(r.saldo)}</td>`:''}<td class="r">${st}</td></tr>`}).join('')}
+      </tbody></table></div>
+      <p class="small muted">Mostrando as próximas parcelas. Elas entram automaticamente nos lançamentos a partir de <b>${monthLabel(l.startMonth||cur)}</b>, na categoria <b>${esc(l.category)}</b>, pago por <b>${esc(METHOD_LABEL[l.method]||l.method)}</b>.</p>
+    </div>
+    <div class="card"><h3>Resumo</h3>
+      <table><tbody>
+        <tr><td class="muted">${l.mode==='fixed'?'Total restante':'Saldo devedor'}</td><td class="r num"><b>${fmt(s.saldo)}</b></td></tr>
+        <tr><td class="muted">Parcelas restantes</td><td class="r num">${s.remaining}</td></tr>
+        <tr><td class="muted">Total ainda a pagar</td><td class="r num">${fmt(s.futureTotal)}</td></tr>
+        <tr><td class="muted">Última parcela</td><td class="r num">${dateBR(s.end)}</td></tr>
+        ${l.contract?`<tr><td class="muted">Plano / taxa</td><td class="r">${esc(l.contract.plan||'—')} · ${l.contract.rate!=null?pct(l.contract.rate)+' a.a.':'—'}${l.contract.index?' + '+esc(l.contract.index):''}</td></tr>
+        <tr><td class="muted">Valor financiado</td><td class="r num">${fmt(l.contract.financed)}</td></tr>
+        <tr><td class="muted">Extrato importado</td><td class="r">${dateBR(l.contract.issuedAt||l.importedAt)}</td></tr>`:''}
+      </tbody></table>
+      ${s.projected?`<div class="note" style="margin-top:12px">O PDF trazia parcelas até a ${l.contract.lastN}ª. As ${s.projected} restantes foram <b>estimadas</b> pela regra do SAC (amortização constante + juros sobre o saldo, seguro igual à última parcela). Quando você subir um extrato mais completo, elas são substituídas pelos valores do banco.</div>`:''}
+      ${(l.versions||[]).length?`<h3 style="margin-top:18px">Histórico de atualizações</h3><table><thead><tr><th>Data</th><th class="r">Saldo</th><th class="r">Restantes</th><th class="r">Economia</th></tr></thead><tbody>${l.versions.slice().reverse().map(v=>`<tr><td class="num">${dateBR(v.at)}</td><td class="r num">${fmt(v.saldoAfter)}</td><td class="r num">${v.remainingBefore} → ${v.remainingAfter}</td><td class="r num pos">${fmt(v.savings)}</td></tr>`).join('')}</tbody></table>`:''}
+    </div>
+  </div>` : `<div class="card empty">Nenhum financiamento cadastrado.<br><span class="small">Veicular: informe a parcela e a quantidade. Imobiliário: suba o PDF de evolução do saldo devedor do banco.</span><br><button class="btn primary" data-act="newloan">+ Financiamento</button></div>`}
+  <p class="small muted">O PDF é lido no seu navegador e não é enviado a nenhum servidor. Só guardamos a tabela de parcelas e os números do contrato — nome, CPF e endereço são descartados.</p>`;
+}
+
+function pdfPreview(p, title){
+  const rows=p.rows, c=p.contract, tmp={mode:'schedule', rows, contract:c}; const s=loanSummary(tmp, rows);
+  return `<div class="note" style="margin-top:4px"><b>${esc(title||'PDF lido com sucesso')}</b><br>
+    ${esc(c.bank||'Banco')} · plano ${esc(c.plan||'—')} · ${c.rate!=null?pct(c.rate)+' a.a.':''}${c.index?' + '+esc(c.index):''} · financiado ${fmt(c.financed)}<br>
+    ${rows.length - s.projected} parcelas no PDF (${s.paidCount} pagas)${s.projected?`, ${s.projected} estimadas pela regra SAC`:''} · total ${c.totalCount}<br>
+    Saldo devedor: <b>${fmt(s.saldo)}</b> · Próxima: <b>${s.next?fmt(s.next.amount)+' em '+dateBR(s.next.due):'—'}</b></div>`;
+}
+function compactRows(rows){ return rows.map(r=>{ const o={n:r.n,due:r.due,amount:r.amount,juros:r.juros,amort:r.amort,saldo:r.saldo,seguro:r.seguro,taxa:r.taxa}; if(r.paidAt) o.paidAt=r.paidAt; if(r.projected) o.projected=true; return o; }); }
+
+function loanForm(l){
+  const isNew=!l;
+  l = l || {kind:'veicular', name:'', lender:'', category:'', method:'boleto', mode:'fixed', amount:'', count:'', firstDate:todayISO(), startMonth:monthKey(todayISO()), notes:''};
+  let parsed=null;
+  const catDefault = k => { const out=S.categories.out; const want = k==='imobiliario'?'Moradia':k==='veicular'?'Transporte':'Outros'; return out.includes(want)?want:out[0]; };
+  const draw=()=>{
+    const cat = l.category || catDefault(l.kind);
+    const first = l.mode==='fixed' ? (l.firstDate||todayISO()) : (parsed? parsed.rows[0].due : (l.rows&&l.rows[0]?l.rows[0].due:todayISO()));
+    const months=[]; { const a=monthKey(first), b=addMonths(monthKey(todayISO()),2); for(let k=a;k<=b;k=addMonths(k,1)) months.push(k); if(l.startMonth && !months.includes(l.startMonth)) months.push(l.startMonth); months.sort(); }
+    openModal(`<h2>${isNew?'Novo financiamento':'Editar financiamento'}</h2>
+    <form class="form" id="lf">
+      <label>Tipo<select name="kind" id="l_kind">${Object.entries(LOAN_KINDS).map(([k,v])=>`<option value="${k}" ${l.kind===k?'selected':''}>${v}</option>`).join('')}</select></label>
+      <label>Banco / credor<input name="lender" value="${esc(l.lender)}" placeholder="ex.: BRB, Banco Toyota"></label>
+      <label class="full">Nome<input name="name" value="${esc(l.name)}" placeholder="${l.kind==='imobiliario'?'ex.: Apartamento':'ex.: Carro'}"></label>
+      ${isNew?`<div class="full"><div class="typeseg"><button type="button" class="${l.mode==='fixed'?'on in':''}" data-mode="fixed">Parcela fixa</button><button type="button" class="${l.mode==='schedule'?'on in':''}" data-mode="schedule">Importar PDF do banco</button></div></div>`:''}
+      ${l.mode==='fixed' ? `
+        <label>Valor da parcela<input name="amount" inputmode="decimal" value="${l.amount!==''?String(l.amount).replace('.',','):''}" placeholder="0,00"></label>
+        <label>Quantidade de parcelas<input name="count" type="number" min="1" max="600" value="${esc(l.count)}" placeholder="ex.: 48"></label>
+        <label>Vencimento da 1ª parcela<input name="firstDate" type="date" value="${esc(l.firstDate)}"><span class="hint">as demais vencem no mesmo dia dos meses seguintes</span></label>
+        <div class="small muted" id="fixedHint" style="align-self:end;padding-bottom:10px"></div>`
+      : (isNew ? `<label class="full">PDF de evolução do saldo devedor<input type="file" id="l_pdf" accept="application/pdf,.pdf"><span class="hint">lido aqui no seu navegador — o arquivo não é enviado</span></label><div class="full" id="pdfOut">${parsed?pdfPreview(parsed):''}</div>` : `<div class="full note">Tabela importada do PDF em ${dateBR(l.contract&&l.contract.issuedAt||l.importedAt)}. Para atualizar após uma amortização, use <b>Atualizar com novo PDF</b>.</div>`)}
+      <label>Categoria<select name="category">${S.categories.out.map(c=>`<option ${cat===c?'selected':''}>${esc(c)}</option>`).join('')}</select></label>
+      <label>Forma de pagamento<select name="method">${LOAN_METHODS.map(k=>`<option value="${k}" ${l.method===k?'selected':''}>${METHOD_LABEL[k]}</option>`).join('')}</select></label>
+      <label class="full">Lançar nas despesas a partir de<select name="startMonth">${months.map(k=>`<option value="${k}" ${(l.startMonth||monthKey(todayISO()))===k?'selected':''}>${monthLabel(k)}</option>`).join('')}</select><span class="hint">Meses anteriores não recebem as parcelas — evita duplicar o que você já lançou à mão. Se já lançou a parcela deste mês, exclua-a ou escolha o próximo mês.</span></label>
+      <label class="full">Observação <span class="hint">opcional</span><input name="notes" value="${esc(l.notes||'')}"></label>
+    </form>
+    <div class="actions">${!isNew?`<button class="btn danger left" data-m="del">Excluir</button>`:''}<button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok">Salvar</button></div>`);
+    const f=$('#lf');
+    const keep=()=>{ Object.assign(l, readForm(f)); };
+    $('#l_kind').onchange=()=>{ const prevDefault=catDefault(l.kind); keep(); if(l.category===prevDefault) l.category=catDefault(l.kind); if(isNew && l.kind==='imobiliario' && l.mode==='fixed' && !l.amount) l.mode='schedule'; draw(); };
+    f.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{ keep(); l.mode=b.dataset.mode; draw(); });
+    const fh=()=>{ const el=$('#fixedHint'); if(!el) return; const d=readForm(f); const n=parseInt(d.count)||0, v=parseNum(d.amount); el.textContent = n&&v&&d.firstDate ? `Última parcela em ${dateBR(isoAddMonths(d.firstDate,n-1))} · total ${fmt(n*v)}` : ''; };
+    if($('#fixedHint')){ f.addEventListener('input',fh); fh(); }
+    const pdf=$('#l_pdf');
+    if(pdf) pdf.onchange=async()=>{ const file=pdf.files[0]; if(!file) return; $('#pdfOut').innerHTML='<div class="small muted">Lendo o PDF…</div>';
+      try{ parsed=await LoanImport.fromFile(file); keep();
+        if(!l.lender && parsed.contract.bank) l.lender=parsed.contract.bank;
+        if(!l.name) l.name = l.kind==='imobiliario' ? 'Financiamento imobiliário' : 'Financiamento';
+        draw(); }
+      catch(e){ console.warn(e); parsed=null; $('#pdfOut').innerHTML=`<div class="auth-err">${esc(e.message||'Não foi possível ler o PDF.')}</div>`; } };
+    modalActions({
+      ok:()=>{ keep();
+        if(!String(l.name||'').trim()) return toast('Dê um nome ao financiamento');
+        const rec={id:l.id||uid(), kind:l.kind, name:l.name.trim(), lender:(l.lender||'').trim(), category:l.category, method:l.method, mode:l.mode, startMonth:l.startMonth, notes:l.notes||'', versions:l.versions||[]};
+        if(l.mode==='fixed'){
+          const v=parseNum(l.amount), n=parseInt(l.count);
+          if(!(v>0)) return toast('Informe o valor da parcela'); if(!(n>0&&n<=600)) return toast('Informe a quantidade de parcelas (1 a 600)'); if(!l.firstDate) return toast('Informe o vencimento da 1ª parcela');
+          Object.assign(rec,{amount:Math.round(v*100)/100, count:n, firstDate:l.firstDate});
+        } else {
+          if(isNew){ if(!parsed) return toast('Selecione o PDF do banco'); rec.rows=compactRows(parsed.rows); rec.contract=parsed.contract; rec.importedAt=todayISO(); }
+          else { rec.rows=l.rows; rec.contract=l.contract; rec.importedAt=l.importedAt; }
+        }
+        S.loans=S.loans||[];
+        if(isNew) S.loans.push(rec); else S.loans[S.loans.findIndex(x=>x.id===rec.id)]=rec;
+        selLoan=rec.id; save(); closeModal(); location.hash='financiamentos'; rerender(); toast('Financiamento salvo'); },
+      del:()=>confirmBox(`Excluir "${esc(l.name)}"? As parcelas deixam de aparecer nos lançamentos.`,()=>{ S.loans=S.loans.filter(x=>x.id!==l.id); save(); rerender(); toast('Financiamento excluído'); })
+    });
+  };
+  draw();
+}
+
+function loanUpdateForm(l){
+  let parsed=null;
+  const draw=()=>{
+    let cmp='';
+    if(parsed){
+      const before=loanSummary(l), after=loanSummary({mode:'schedule', rows:parsed.rows, contract:parsed.contract}, parsed.rows);
+      const savings=before.futureTotal-after.futureTotal;
+      const saldoDrop = before.saldo - after.saldo;
+      const mismatch = l.contract && l.contract.contract && parsed.contract.contract && l.contract.contract!==parsed.contract.contract;
+      cmp=`${mismatch?`<div class="auth-err" style="margin-bottom:8px">Atenção: o número do contrato deste PDF é diferente do financiamento cadastrado.</div>`:''}
+      <table><thead><tr><th></th><th class="r">Antes</th><th class="r">Depois</th></tr></thead><tbody>
+        <tr><td class="muted">Saldo devedor</td><td class="r num">${fmt(before.saldo)}</td><td class="r num"><b>${fmt(after.saldo)}</b></td></tr>
+        <tr><td class="muted">Parcelas restantes</td><td class="r num">${before.remaining}</td><td class="r num"><b>${after.remaining}</b></td></tr>
+        <tr><td class="muted">Próxima parcela</td><td class="r num">${before.next?fmt(before.next.amount):'—'}</td><td class="r num"><b>${after.next?fmt(after.next.amount):'—'}</b></td></tr>
+        <tr><td class="muted">Última parcela</td><td class="r num">${dateBR(before.end)}</td><td class="r num"><b>${dateBR(after.end)}</b></td></tr>
+        <tr><td class="muted">Total ainda a pagar</td><td class="r num">${fmt(before.futureTotal)}</td><td class="r num"><b>${fmt(after.futureTotal)}</b></td></tr>
+      </tbody></table>
+      <div class="note" style="margin-top:10px">${savings>0?`Economia estimada: <b class="pos">${fmt(savings)}</b> a menos em parcelas futuras.`:'Sem redução no total das parcelas futuras.'}${after.projected?` · ${after.projected} parcelas finais estimadas (o PDF não as trazia).`:''}</div>
+      <div class="form" style="margin-top:12px">
+        <div class="full small" style="font-weight:600;color:var(--ink-2)">Registrar o valor amortizado como despesa? <span class="hint" style="font-weight:400">opcional — deixe em branco se já lançou</span></div>
+        <label>Valor amortizado<input id="am_val" inputmode="decimal" placeholder="${saldoDrop>0?String(saldoDrop.toFixed(2)).replace('.',','):'0,00'}"></label>
+        <label>Data<input id="am_date" type="date" value="${todayISO()}"></label>
+        <label>Forma<select id="am_method">${['pix','debito','boleto'].map(k=>`<option value="${k}">${METHOD_LABEL[k]}</option>`).join('')}</select></label>
+      </div>`;
+    }
+    openModal(`<h2>Atualizar ${esc(l.name)}</h2>
+      <p class="small muted" style="margin-top:0">Suba o novo PDF de evolução do saldo devedor (por exemplo, depois de uma amortização). As parcelas futuras serão substituídas pelas novas.</p>
+      <label class="form" style="display:block"><input type="file" id="u_pdf" accept="application/pdf,.pdf"></label>
+      <div id="u_out" style="margin-top:12px">${parsed?pdfPreview(parsed,'Novo PDF lido')+'<div style="height:10px"></div>'+cmp:''}</div>
+      <div class="actions"><button class="btn" data-m="cancel">Cancelar</button><button class="btn primary" data-m="ok" ${parsed?'':'disabled'}>Aplicar atualização</button></div>`);
+    $('#u_pdf').onchange=async()=>{ const file=$('#u_pdf').files[0]; if(!file) return; $('#u_out').innerHTML='<div class="small muted">Lendo o PDF…</div>';
+      try{ parsed=await LoanImport.fromFile(file); draw(); } catch(e){ parsed=null; $('#u_out').innerHTML=`<div class="auth-err">${esc(e.message||'Não foi possível ler o PDF.')}</div>`; } };
+    modalActions({ ok:()=>{
+      if(!parsed) return;
+      const before=loanSummary(l), after=loanSummary({mode:'schedule', rows:parsed.rows, contract:parsed.contract}, parsed.rows);
+      const amVal=parseNum($('#am_val')?.value), amDate=$('#am_date')?.value||todayISO(), amMethod=$('#am_method')?.value||'pix';
+      l.versions=l.versions||[];
+      l.versions.push({at:todayISO(), saldoBefore:before.saldo, saldoAfter:after.saldo, remainingBefore:before.remaining, remainingAfter:after.remaining, futureBefore:before.futureTotal, futureAfter:after.futureTotal, savings:Math.round((before.futureTotal-after.futureTotal)*100)/100, amortized:amVal||null});
+      if(l.versions.length>30) l.versions=l.versions.slice(-30);
+      l.rows=compactRows(parsed.rows); l.contract=parsed.contract; l.importedAt=todayISO();
+      if(amVal>0) S.tx.push({id:uid(), type:'out', desc:`Amortização — ${l.name}`, amount:Math.round(amVal*100)/100, date:amDate, category:l.category, method:amMethod, notes:'Amortização extraordinária'});
+      save(); closeModal(); rerender(); toast('Financiamento atualizado'); } });
+  };
+  draw();
 }
 
 /* ---------- Investimentos ---------- */
@@ -771,7 +982,8 @@ function loadSample(){
     {id:uid(),name:'Fundo DI',institution:'BTG',kind:'Fundo DI',indexer:'cdi',rate:98,amount:3000,date:ago(60),maturity:'',liquidity:'d30',taxFree:false},
     {id:uid(),name:'Carteira de FIIs',institution:'XP',kind:'FII',indexer:'variavel',rate:0,amount:4000,current:4230,date:ago(250),maturity:'',liquidity:'dx',liqDays:2,taxFree:true}
   ];
-  S = Object.assign(DEFAULT(), {settings:S.settings, categories:S.categories, cards:[nu,it], tx, invest, paid:{[nu.id]:{[prev]:true,[prev2]:true},[it.id]:{[prev]:true,[prev2]:true}}});
+  const loans=[{id:uid(),kind:'veicular',name:'Carro',lender:'Banco Toyota',category:'Transporte',method:'boleto',mode:'fixed',amount:1450,count:48,firstDate:d(addMonths(cur,-10),15),startMonth:addMonths(cur,-2),notes:'',versions:[]}];
+  S = Object.assign(DEFAULT(), {settings:S.settings, categories:S.categories, cards:[nu,it], tx, invest, loans, paid:{[nu.id]:{[prev]:true,[prev2]:true},[it.id]:{[prev]:true,[prev2]:true}}});
   save(); rerender(); toast('Dados de exemplo carregados');
 }
 
@@ -801,6 +1013,10 @@ document.addEventListener('click', e=>{
     case 'gomonth': curMonth=el.dataset.m; rerender(); break;
     case 'togglepaid': { S.paid[id]=S.paid[id]||{}; const m=el.dataset.m; S.paid[id][m]=!S.paid[id][m]; save(); rerender(); break; }
     case 'newinv': invForm(); break;
+    case 'newloan': loanForm(); break;
+    case 'editloan': loanForm(structuredClone(S.loans.find(l=>l.id===id))); break;
+    case 'updloan': loanUpdateForm(S.loans.find(l=>l.id===id)); break;
+    case 'selloan': selLoan=id; if(el.dataset.go){ location.hash='financiamentos'; } rerender(); break;
     case 'editinv': invForm(structuredClone(S.invest.find(i=>i.id===id))); break;
     case 'invtab': invTab=el.dataset.v; rerender(); break;
     case 'sample': (S.tx.length||S.invest.length||S.cards.length) ? confirmBox('Substituir seus dados atuais pelos dados de exemplo?',loadSample) : loadSample(); break;
